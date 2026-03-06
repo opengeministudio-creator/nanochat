@@ -1,5 +1,9 @@
 # nanochat
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/)
+[![uv](https://img.shields.io/badge/Package%20Manager-uv-6e56cf.svg)](https://github.com/astral-sh/uv)
+
 ![nanochat logo](dev/nanochat.png)
 
 nanochat is a compact, hackable LLM training stack that runs end-to-end on a single machine. It covers tokenizer training, base pretraining, SFT/RL chat tuning, evaluation, and local chat interfaces (CLI + web).
