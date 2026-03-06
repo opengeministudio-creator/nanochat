@@ -284,17 +284,8 @@ class RustBPETokenizer:
             ids.extend(token_ids)
             mask.extend([mask_val] * len(token_ids))
 
-        # sometimes the first message is a system message...
-        # => just merge it with the second (user) message
-        if conversation["messages"][0]["role"] == "system":
-            # some conversation surgery is necessary here for now...
-            conversation = copy.deepcopy(conversation) # avoid mutating the original
-            messages = conversation["messages"]
-            assert messages[1]["role"] == "user", "System message must be followed by a user message"
-            messages[1]["content"] = messages[0]["content"] + "\n\n" + messages[1]["content"]
-            messages = messages[1:]
-        else:
-            messages = conversation["messages"]
+        # optional system message is allowed at the beginning of a conversation
+        messages = conversation["messages"]
         assert len(messages) >= 1, f"Conversation has less than 1 message: {messages}"
 
         # fetch all the special tokens we need
@@ -308,21 +299,30 @@ class RustBPETokenizer:
 
         # now we can tokenize the conversation
         add_tokens(bos, 0)
+        has_system_prefix = messages[0]["role"] == "system"
+        if has_system_prefix:
+            assert len(messages) >= 2, "System message must be followed by at least one user message"
+
         for i, message in enumerate(messages):
 
             # some sanity checking here around assumptions, to prevent footguns
-            must_be_from = "user" if i % 2 == 0 else "assistant"
+            if has_system_prefix and i == 0:
+                must_be_from = "system"
+            elif has_system_prefix:
+                must_be_from = "user" if i % 2 == 1 else "assistant"
+            else:
+                must_be_from = "user" if i % 2 == 0 else "assistant"
             assert message["role"] == must_be_from, f"Message {i} is from {message['role']} but should be from {must_be_from}"
 
             # content can be either a simple string or a list of parts (e.g. containing tool calls)
             content = message["content"]
 
-            if message["role"] == "user":
-                assert isinstance(content, str), "User messages are simply expected to be strings"
+            if message["role"] in {"system", "user"}:
+                assert isinstance(content, str), "System/user messages are expected to be strings"
                 value_ids = self.encode(content)
                 add_tokens(start, 0)
                 add_tokens(channel_tok, 0)
-                add_tokens(self.encode("user"), 0)
+                add_tokens(self.encode(message["role"]), 0)
                 add_tokens(message_tok, 0)
                 add_tokens(value_ids, 0)
                 add_tokens(end, 0)
