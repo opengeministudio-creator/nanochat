@@ -264,7 +264,7 @@ async def generate_stream(
     max_new_tokens = max_new_tokens if max_new_tokens is not None else args.max_tokens
     top_k = top_k if top_k is not None else args.top_k
 
-    assistant_end = worker.tokenizer.encode_special("<|assistant_end|>")
+    assistant_end = worker.tokenizer.encode_special("<|end_assistant|>")
     bos = worker.tokenizer.get_bos_token_id()
 
     # Accumulate tokens to properly handle multi-byte UTF-8 characters (like emojis)
@@ -322,10 +322,10 @@ async def chat_completions(request: ChatRequest):
     try:
         # Build conversation tokens
         bos = worker.tokenizer.get_bos_token_id()
-        user_start = worker.tokenizer.encode_special("<|user_start|>")
-        user_end = worker.tokenizer.encode_special("<|user_end|>")
-        assistant_start = worker.tokenizer.encode_special("<|assistant_start|>")
-        assistant_end = worker.tokenizer.encode_special("<|assistant_end|>")
+        user_start = worker.tokenizer.encode_special("<|start_user|>")
+        user_end = worker.tokenizer.encode_special("<|end_user|>")
+        assistant_start = worker.tokenizer.encode_special("<|start_assistant|>")
+        assistant_end = worker.tokenizer.encode_special("<|end_assistant|>")
 
         conversation_tokens = [bos]
         for message in request.messages:

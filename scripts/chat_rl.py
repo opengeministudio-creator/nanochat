@@ -84,7 +84,7 @@ print0(f"Calculated number of steps: {num_steps}")
 
 @torch.no_grad()
 def get_batch():
-    assistant_end = tokenizer.encode_special("<|assistant_end|>") # ok to use this token, it's only for padding and isn't used in the loss.
+    assistant_end = tokenizer.encode_special("<|end_assistant|>") # ok to use this token, it's only for padding and isn't used in the loss.
     rank_indices = range(ddp_rank, len(train_task), ddp_world_size) # each rank is responsible for different examples in the training data
     for example_idx in itertools.cycle(rank_indices):
 
@@ -92,7 +92,7 @@ def get_batch():
         conversation = train_task[example_idx]
 
         # Tokenize the conversation, deleting the last Assistant message and priming the Assistant for a completion instead
-        # (i.e. keep the <|assistant_start|>, but delete everything after it)
+        # (i.e. keep the <|start_assistant|>, but delete everything after it)
         tokens = tokenizer.render_for_completion(conversation)
         prefix_length = len(tokens)
 

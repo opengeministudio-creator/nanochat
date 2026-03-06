@@ -12,22 +12,22 @@ from functools import lru_cache
 
 SPECIAL_TOKENS = [
     # every document begins with the Beginning of Sequence (BOS) token that delimits documents
-    "<|bos|>",
+    "<|start|>",
     # tokens below are only used during finetuning to render Conversations into token ids
-    "<|user_start|>", # user messages
-    "<|user_end|>",
-    "<|assistant_start|>", # assistant messages
-    "<|assistant_end|>",
-    "<|python_start|>", # assistant invokes python REPL tool
-    "<|python_end|>",
-    "<|output_start|>", # python REPL outputs back to assistant
-    "<|output_end|>",
+    "<|start_user|>", # user messages
+    "<|end_user|>",
+    "<|start_assistant|>", # assistant messages
+    "<|end_assistant|>",
+    "<|start_python|>", # assistant invokes python REPL tool
+    "<|end_python|>",
+    "<|start_output|>", # python REPL outputs back to assistant
+    "<|end_output|>",
 ]
 
-# NOTE: this split pattern deviates from GPT-4 in that we use \p{N}{1,2} instead of \p{N}{1,3}
-# I did this because I didn't want to "waste" too many tokens on numbers for smaller vocab sizes.
-# I verified that 2 is the sweet spot for vocab size of 32K. 1 is a bit worse, 3 was worse still.
-SPLIT_PATTERN = r"""'(?i:[sdmt]|ll|ve|re)|[^\r\n\p{L}\p{N}]?+\p{L}+|\p{N}{1,2}| ?[^\s\p{L}\p{N}]++[\r\n]*|\s*[\r\n]|\s+(?!\S)|\s+"""
+# Harmony-style split pattern (close to o200k):
+# - preserves mixed-case word chunks more faithfully
+# - uses 1-3 digit grouping for numbers
+SPLIT_PATTERN = r"""[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]*[\p{Ll}\p{Lm}\p{Lo}\p{M}]+(?i:'s|'t|'re|'ve|'m|'ll|'d)?|[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]+[\p{Ll}\p{Lm}\p{Lo}\p{M}]*(?i:'s|'t|'re|'ve|'m|'ll|'d)?|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+"""
 
 # -----------------------------------------------------------------------------
 # Generic GPT-4-style tokenizer based on HuggingFace Tokenizer
@@ -66,11 +66,7 @@ class HuggingFaceTokenizer:
         ))
         # Normalizer: None
         tokenizer.normalizer = None
-        # Pre-tokenizer: GPT-4 style
-        # the regex pattern used by GPT-4 to split text into groups before BPE
-        # NOTE: The pattern was changed from \p{N}{1,3} to \p{N}{1,2} because I suspect it is harmful to
-        # very small models and smaller vocab sizes, because it is a little bit wasteful in the token space.
-        # (but I haven't validated this! TODO)
+        # Pre-tokenizer: harmony/o200k-style split regex.
         gpt4_split_regex = Regex(SPLIT_PATTERN) # huggingface demands that you wrap it in Regex!!
         tokenizer.pre_tokenizer = pre_tokenizers.Sequence([
             pre_tokenizers.Split(pattern=gpt4_split_regex, behavior="isolated", invert=False),
@@ -124,8 +120,8 @@ class HuggingFaceTokenizer:
 
     def get_bos_token_id(self):
         # Different HuggingFace models use different BOS tokens and there is little consistency
-        # 1) attempt to find a <|bos|> token
-        bos = self.encode_special("<|bos|>")
+        # 1) attempt to find a <|start|> token
+        bos = self.encode_special("<|start|>")
         # 2) if that fails, attempt to find a <|endoftext|> token (e.g. GPT-2 models)
         if bos is None:
             bos = self.encode_special("<|endoftext|>")
@@ -187,14 +183,14 @@ class RustBPETokenizer:
             mergeable_ranks=mergeable_ranks, # dict[bytes, int] (token bytes -> merge priority rank)
             special_tokens=special_tokens, # dict[str, int] (special token name -> token id)
         )
-        return cls(enc, "<|bos|>")
+        return cls(enc, "<|start|>")
 
     @classmethod
     def from_directory(cls, tokenizer_dir):
         pickle_path = os.path.join(tokenizer_dir, "tokenizer.pkl")
         with open(pickle_path, "rb") as f:
             enc = pickle.load(f)
-        return cls(enc, "<|bos|>")
+        return cls(enc, "<|start|>")
 
     @classmethod
     def from_pretrained(cls, tiktoken_name):
@@ -203,7 +199,7 @@ class RustBPETokenizer:
         # tiktoken calls the special document delimiter token "<|endoftext|>"
         # yes this is confusing because this token is almost always PREPENDED to the beginning of the document
         # it most often is used to signal the start of a new sequence to the LLM during inference etc.
-        # so in nanoChat we always use "<|bos|>" short for "beginning of sequence", but historically it is often called "<|endoftext|>".
+        # so in nanoChat we always use "<|start|>" short for "beginning of sequence", but historically it is often called "<|endoftext|>".
         return cls(enc, "<|endoftext|>")
 
     def get_vocab_size(self):
@@ -293,10 +289,10 @@ class RustBPETokenizer:
 
         # fetch all the special tokens we need
         bos = self.get_bos_token_id()
-        user_start, user_end = self.encode_special("<|user_start|>"), self.encode_special("<|user_end|>")
-        assistant_start, assistant_end = self.encode_special("<|assistant_start|>"), self.encode_special("<|assistant_end|>")
-        python_start, python_end = self.encode_special("<|python_start|>"), self.encode_special("<|python_end|>")
-        output_start, output_end = self.encode_special("<|output_start|>"), self.encode_special("<|output_end|>")
+        user_start, user_end = self.encode_special("<|start_user|>"), self.encode_special("<|end_user|>")
+        assistant_start, assistant_end = self.encode_special("<|start_assistant|>"), self.encode_special("<|end_assistant|>")
+        python_start, python_end = self.encode_special("<|start_python|>"), self.encode_special("<|end_python|>")
+        output_start, output_end = self.encode_special("<|start_output|>"), self.encode_special("<|end_output|>")
 
         # now we can tokenize the conversation
         add_tokens(bos, 0)
@@ -328,12 +324,12 @@ class RustBPETokenizer:
                             # string part => simply add the tokens
                             add_tokens(value_ids, 1)
                         elif part["type"] == "python":
-                            # python tool call => add the tokens inside <|python_start|> and <|python_end|>
+                            # python tool call => add the tokens inside <|start_python|> and <|end_python|>
                             add_tokens(python_start, 1)
                             add_tokens(value_ids, 1)
                             add_tokens(python_end, 1)
                         elif part["type"] == "python_output":
-                            # python output => add the tokens inside <|output_start|> and <|output_end|>
+                            # python output => add the tokens inside <|start_output|> and <|end_output|>
                             # none of these tokens are supervised because the tokens come from Python at test time
                             add_tokens(output_start, 0)
                             add_tokens(value_ids, 0)
@@ -380,7 +376,7 @@ class RustBPETokenizer:
         ids, mask = self.render_conversation(conversation)
 
         # Finally, to prime the Assistant for a completion, append the Assistant start token
-        assistant_start = self.encode_special("<|assistant_start|>")
+        assistant_start = self.encode_special("<|start_assistant|>")
         ids.append(assistant_start)
         return ids
 

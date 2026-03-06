@@ -28,8 +28,8 @@ model, tokenizer, meta = load_model(args.source, device, phase="eval", model_tag
 
 # Special tokens for the chat state machine
 bos = tokenizer.get_bos_token_id()
-user_start, user_end = tokenizer.encode_special("<|user_start|>"), tokenizer.encode_special("<|user_end|>")
-assistant_start, assistant_end = tokenizer.encode_special("<|assistant_start|>"), tokenizer.encode_special("<|assistant_end|>")
+user_start, user_end = tokenizer.encode_special("<|start_user|>"), tokenizer.encode_special("<|end_user|>")
+assistant_start, assistant_end = tokenizer.encode_special("<|start_assistant|>"), tokenizer.encode_special("<|end_assistant|>")
 
 # Create Engine for efficient generation
 engine = Engine(model, tokenizer)
