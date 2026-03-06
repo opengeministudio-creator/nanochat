@@ -37,6 +37,10 @@ class GPTConfig:
     # Characters: L=long (full context), S=short (half context)
     # Examples: "L"=all full context, "SL"=alternating, "SSL"=two short then one long
     window_pattern: str = "SSSL"
+    # Mixture-of-Experts (MoE) settings. Keep num_experts=0 for dense MLP.
+    num_experts: int = 0
+    top_k_experts: int = 2
+    num_shared_experts: int = 1
 
 
 def norm(x):
@@ -137,11 +141,78 @@ class MLP(nn.Module):
         return x
 
 
+class MoE(nn.Module):
+    """Simple top-k routed MoE MLP with optional shared dense experts."""
+
+    def __init__(self, config):
+        super().__init__()
+        assert config.num_experts > 0
+        assert 1 <= config.top_k_experts <= config.num_experts
+        self.n_embd = config.n_embd
+        self.num_experts = config.num_experts
+        self.top_k = config.top_k_experts
+        self.num_shared = config.num_shared_experts
+        # Keep active FLOPs/token roughly matched with dense 4*d hidden MLP
+        denom = self.top_k + self.num_shared
+        hidden = int(round((4 * self.n_embd / denom) / 128) * 128)
+        self.expert_hidden_dim = max(128, hidden)
+
+        self.router = Linear(self.n_embd, self.num_experts, bias=False)
+        # Expert params are 3D tensors: (num_experts, in/out, out/in)
+        self.experts_fc = nn.Parameter(torch.empty(self.num_experts, self.n_embd, self.expert_hidden_dim))
+        self.experts_proj = nn.Parameter(torch.empty(self.num_experts, self.expert_hidden_dim, self.n_embd))
+        self.expert_bias = nn.Parameter(torch.zeros(self.num_experts), requires_grad=False)
+
+        self.shared_fc = nn.Parameter(torch.empty(self.num_shared, self.n_embd, self.expert_hidden_dim)) if self.num_shared > 0 else None
+        self.shared_proj = nn.Parameter(torch.empty(self.num_shared, self.expert_hidden_dim, self.n_embd)) if self.num_shared > 0 else None
+
+    def _expert_mlp(self, x, w1, w2):
+        h = torch.einsum('tc,ch->th', x, w1)
+        h = F.relu(h).square()
+        y = torch.einsum('th,hc->tc', h, w2)
+        return y
+
+    def forward(self, x):
+        b, t, c = x.shape
+        x_flat = x.reshape(b * t, c)
+
+        router_logits = self.router(x_flat) + self.expert_bias
+        scores = torch.sigmoid(router_logits)
+        topk_scores, topk_idx = torch.topk(scores, k=self.top_k, dim=-1)
+        topk_scores = topk_scores / (topk_scores.sum(dim=-1, keepdim=True) + 1e-9)
+
+        y_flat = torch.zeros_like(x_flat)
+        # Route tokens to experts.
+        for expert_id in range(self.num_experts):
+            token_idx, which = torch.where(topk_idx == expert_id)
+            if token_idx.numel() == 0:
+                continue
+            tokens = x_flat[token_idx]
+            out = self._expert_mlp(tokens, self.experts_fc[expert_id], self.experts_proj[expert_id])
+            gates = topk_scores[token_idx, which].unsqueeze(-1).to(out.dtype)
+            y_flat[token_idx] += gates * out
+
+        if self.num_shared > 0:
+            shared_out = 0
+            for i in range(self.num_shared):
+                shared_out = shared_out + self._expert_mlp(x_flat, self.shared_fc[i], self.shared_proj[i])
+            y_flat = y_flat + shared_out
+
+        if self.training:
+            # Aux-loss-free balancing via bias nudging toward uniform expert utilization.
+            counts = torch.bincount(topk_idx.reshape(-1), minlength=self.num_experts).float()
+            target = counts.mean()
+            delta = (target - counts).clamp(-32, 32)
+            self.expert_bias.add_(0.001 * delta.sign())
+
+        return y_flat.view(b, t, c)
+
+
 class Block(nn.Module):
     def __init__(self, config, layer_idx):
         super().__init__()
         self.attn = CausalSelfAttention(config, layer_idx)
-        self.mlp = MLP(config)
+        self.mlp = MoE(config) if config.num_experts > 0 else MLP(config)
 
     def forward(self, x, ve, cos_sin, window_size, kv_cache):
         x = x + self.attn(norm(x), ve, cos_sin, window_size, kv_cache)
@@ -219,8 +290,16 @@ class GPT(nn.Module):
             torch.nn.init.uniform_(block.attn.c_k.weight, -s, s)
             torch.nn.init.uniform_(block.attn.c_v.weight, -s, s)
             torch.nn.init.zeros_(block.attn.c_proj.weight) # projections are zero
-            torch.nn.init.uniform_(block.mlp.c_fc.weight, -s, s)
-            torch.nn.init.zeros_(block.mlp.c_proj.weight)
+            if isinstance(block.mlp, MLP):
+                torch.nn.init.uniform_(block.mlp.c_fc.weight, -s, s)
+                torch.nn.init.zeros_(block.mlp.c_proj.weight)
+            else:
+                torch.nn.init.uniform_(block.mlp.router.weight, -s, s)
+                torch.nn.init.uniform_(block.mlp.experts_fc, -s, s)
+                torch.nn.init.zeros_(block.mlp.experts_proj)
+                if block.mlp.shared_fc is not None:
+                    torch.nn.init.uniform_(block.mlp.shared_fc, -s, s)
+                    torch.nn.init.zeros_(block.mlp.shared_proj)
 
         # Per-layer scalars
         self.resid_lambdas.fill_(1.0)   # 1.0 => typical residual connections at init
@@ -314,6 +393,15 @@ class GPT(nn.Module):
         value_embeds_numel = sum(ve.weight.numel() for ve in self.value_embeds.values())
         nparams_exclude = (self.transformer.wte.weight.numel() + value_embeds_numel +
                           self.resid_lambdas.numel() + self.x0_lambdas.numel())
+        # For MoE, only active experts contribute FLOPs for each token.
+        inactive_moe_params = 0
+        for block in self.transformer.h:
+            if isinstance(block.mlp, MoE):
+                inactive = block.mlp.num_experts - block.mlp.top_k
+                if inactive > 0:
+                    inactive_moe_params += inactive * (
+                        block.mlp.experts_fc[0].numel() + block.mlp.experts_proj[0].numel()
+                    )
         h, q, t = self.config.n_head, self.config.n_embd // self.config.n_head, self.config.sequence_len
         # Sum attention FLOPs per layer, accounting for sliding window
         attn_flops = 0
@@ -321,7 +409,7 @@ class GPT(nn.Module):
             window = window_size[0]  # (left, right) tuple, we use left
             effective_seq = t if window < 0 else min(window, t)
             attn_flops += 12 * h * q * effective_seq
-        num_flops_per_token = 6 * (nparams - nparams_exclude) + attn_flops
+        num_flops_per_token = 6 * (nparams - nparams_exclude - inactive_moe_params) + attn_flops
         return num_flops_per_token
 
     def num_scaling_params(self):
@@ -344,11 +432,20 @@ class GPT(nn.Module):
         scalars = self.resid_lambdas.numel() + self.x0_lambdas.numel()
         total = wte + value_embeds + lm_head + transformer_matrices + scalars
         assert total == sum(p.numel() for p in self.parameters()), "Parameter count mismatch"
+        active_transformer_matrices = transformer_matrices
+        for block in self.transformer.h:
+            if isinstance(block.mlp, MoE):
+                inactive = block.mlp.num_experts - block.mlp.top_k
+                if inactive > 0:
+                    active_transformer_matrices -= inactive * (
+                        block.mlp.experts_fc[0].numel() + block.mlp.experts_proj[0].numel()
+                    )
         return {
             'wte': wte,
             'value_embeds': value_embeds,
             'lm_head': lm_head,
             'transformer_matrices': transformer_matrices,
+            'active_transformer_matrices': active_transformer_matrices,
             'scalars': scalars,
             'total': total,
         }
