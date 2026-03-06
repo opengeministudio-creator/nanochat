@@ -11,23 +11,29 @@ import copy
 from functools import lru_cache
 
 SPECIAL_TOKENS = [
-    # every document begins with the Beginning of Sequence (BOS) token that delimits documents
-    "<|bos|>",
-    # tokens below are only used during finetuning to render Conversations into token ids
-    "<|user_start|>", # user messages
-    "<|user_end|>",
-    "<|assistant_start|>", # assistant messages
-    "<|assistant_end|>",
-    "<|python_start|>", # assistant invokes python REPL tool
-    "<|python_end|>",
-    "<|output_start|>", # python REPL outputs back to assistant
-    "<|output_end|>",
+    # harmony-style document boundary tokens
+    "<|startoftext|>",
+    "<|endoftext|>",
+    # harmony-style chat structure tokens
+    "<|start|>",
+    "<|end|>",
+    "<|message|>",
+    "<|channel|>",
+    # harmony-style tool-call tokens
+    "<|call|>",
+    "<|return|>",
 ]
 
-# NOTE: this split pattern deviates from GPT-4 in that we use \p{N}{1,2} instead of \p{N}{1,3}
-# I did this because I didn't want to "waste" too many tokens on numbers for smaller vocab sizes.
-# I verified that 2 is the sweet spot for vocab size of 32K. 1 is a bit worse, 3 was worse still.
-SPLIT_PATTERN = r"""'(?i:[sdmt]|ll|ve|re)|[^\r\n\p{L}\p{N}]?+\p{L}+|\p{N}{1,2}| ?[^\s\p{L}\p{N}]++[\r\n]*|\s*[\r\n]|\s+(?!\S)|\s+"""
+# split pattern matching OpenAI's o200k tokenizer family.
+SPLIT_PATTERN = "|".join([
+    r"""[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]*[\p{Ll}\p{Lm}\p{Lo}\p{M}]+(?i:'s|'t|'re|'ve|'m|'ll|'d)?""",
+    r"""[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]+[\p{Ll}\p{Lm}\p{Lo}\p{M}]*(?i:'s|'t|'re|'ve|'m|'ll|'d)?""",
+    r"""\p{N}{1,3}""",
+    r""" ?[^\s\p{L}\p{N}]+[\r\n/]*""",
+    r"""\s*[\r\n]+""",
+    r"""\s+(?!\S)""",
+    r"""\s+""",
+])
 
 # -----------------------------------------------------------------------------
 # Generic GPT-4-style tokenizer based on HuggingFace Tokenizer
@@ -124,8 +130,8 @@ class HuggingFaceTokenizer:
 
     def get_bos_token_id(self):
         # Different HuggingFace models use different BOS tokens and there is little consistency
-        # 1) attempt to find a <|bos|> token
-        bos = self.encode_special("<|bos|>")
+        # 1) attempt to find a harmony style BOS token
+        bos = self.encode_special("<|startoftext|>")
         # 2) if that fails, attempt to find a <|endoftext|> token (e.g. GPT-2 models)
         if bos is None:
             bos = self.encode_special("<|endoftext|>")
@@ -187,14 +193,14 @@ class RustBPETokenizer:
             mergeable_ranks=mergeable_ranks, # dict[bytes, int] (token bytes -> merge priority rank)
             special_tokens=special_tokens, # dict[str, int] (special token name -> token id)
         )
-        return cls(enc, "<|bos|>")
+        return cls(enc, "<|startoftext|>")
 
     @classmethod
     def from_directory(cls, tokenizer_dir):
         pickle_path = os.path.join(tokenizer_dir, "tokenizer.pkl")
         with open(pickle_path, "rb") as f:
             enc = pickle.load(f)
-        return cls(enc, "<|bos|>")
+        return cls(enc, "<|startoftext|>")
 
     @classmethod
     def from_pretrained(cls, tiktoken_name):
@@ -203,7 +209,7 @@ class RustBPETokenizer:
         # tiktoken calls the special document delimiter token "<|endoftext|>"
         # yes this is confusing because this token is almost always PREPENDED to the beginning of the document
         # it most often is used to signal the start of a new sequence to the LLM during inference etc.
-        # so in nanoChat we always use "<|bos|>" short for "beginning of sequence", but historically it is often called "<|endoftext|>".
+        # in nanoChat we treat <|startoftext|> as BOS, but older tiktoken models often only expose <|endoftext|>.
         return cls(enc, "<|endoftext|>")
 
     def get_vocab_size(self):
@@ -293,10 +299,12 @@ class RustBPETokenizer:
 
         # fetch all the special tokens we need
         bos = self.get_bos_token_id()
-        user_start, user_end = self.encode_special("<|user_start|>"), self.encode_special("<|user_end|>")
-        assistant_start, assistant_end = self.encode_special("<|assistant_start|>"), self.encode_special("<|assistant_end|>")
-        python_start, python_end = self.encode_special("<|python_start|>"), self.encode_special("<|python_end|>")
-        output_start, output_end = self.encode_special("<|output_start|>"), self.encode_special("<|output_end|>")
+        start = self.encode_special("<|start|>")
+        end = self.encode_special("<|end|>")
+        message_tok = self.encode_special("<|message|>")
+        channel_tok = self.encode_special("<|channel|>")
+        call_tok = self.encode_special("<|call|>")
+        return_tok = self.encode_special("<|return|>")
 
         # now we can tokenize the conversation
         add_tokens(bos, 0)
@@ -312,11 +320,17 @@ class RustBPETokenizer:
             if message["role"] == "user":
                 assert isinstance(content, str), "User messages are simply expected to be strings"
                 value_ids = self.encode(content)
-                add_tokens(user_start, 0)
+                add_tokens(start, 0)
+                add_tokens(channel_tok, 0)
+                add_tokens(self.encode("user"), 0)
+                add_tokens(message_tok, 0)
                 add_tokens(value_ids, 0)
-                add_tokens(user_end, 0)
+                add_tokens(end, 0)
             elif message["role"] == "assistant":
-                add_tokens(assistant_start, 0)
+                add_tokens(start, 0)
+                add_tokens(channel_tok, 0)
+                add_tokens(self.encode("assistant"), 0)
+                add_tokens(message_tok, 0)
                 if isinstance(content, str):
                     # simple string => simply add the tokens
                     value_ids = self.encode(content)
@@ -328,21 +342,21 @@ class RustBPETokenizer:
                             # string part => simply add the tokens
                             add_tokens(value_ids, 1)
                         elif part["type"] == "python":
-                            # python tool call => add the tokens inside <|python_start|> and <|python_end|>
-                            add_tokens(python_start, 1)
+                            # python tool call => add the tokens inside <|call|> and <|end|>
+                            add_tokens(call_tok, 1)
                             add_tokens(value_ids, 1)
-                            add_tokens(python_end, 1)
+                            add_tokens(end, 1)
                         elif part["type"] == "python_output":
-                            # python output => add the tokens inside <|output_start|> and <|output_end|>
+                            # python output => add the tokens inside <|return|> and <|end|>
                             # none of these tokens are supervised because the tokens come from Python at test time
-                            add_tokens(output_start, 0)
+                            add_tokens(return_tok, 0)
                             add_tokens(value_ids, 0)
-                            add_tokens(output_end, 0)
+                            add_tokens(end, 0)
                         else:
                             raise ValueError(f"Unknown part type: {part['type']}")
                 else:
                     raise ValueError(f"Unknown content type: {type(content)}")
-                add_tokens(assistant_end, 1)
+                add_tokens(end, 1)
 
         # truncate to max_tokens tokens MAX (helps prevent OOMs)
         ids = ids[:max_tokens]
@@ -379,9 +393,14 @@ class RustBPETokenizer:
         # Now tokenize the conversation
         ids, mask = self.render_conversation(conversation)
 
-        # Finally, to prime the Assistant for a completion, append the Assistant start token
-        assistant_start = self.encode_special("<|assistant_start|>")
-        ids.append(assistant_start)
+        # Finally, to prime the Assistant for a completion, append a harmony-style assistant message prefix
+        start = self.encode_special("<|start|>")
+        channel_tok = self.encode_special("<|channel|>")
+        message_tok = self.encode_special("<|message|>")
+        ids.append(start)
+        ids.append(channel_tok)
+        ids.extend(self.encode("assistant"))
+        ids.append(message_tok)
         return ids
 
 # -----------------------------------------------------------------------------

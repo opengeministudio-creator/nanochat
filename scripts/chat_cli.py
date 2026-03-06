@@ -28,8 +28,18 @@ model, tokenizer, meta = load_model(args.source, device, phase="eval", model_tag
 
 # Special tokens for the chat state machine
 bos = tokenizer.get_bos_token_id()
-user_start, user_end = tokenizer.encode_special("<|user_start|>"), tokenizer.encode_special("<|user_end|>")
-assistant_start, assistant_end = tokenizer.encode_special("<|assistant_start|>"), tokenizer.encode_special("<|assistant_end|>")
+start, end = tokenizer.encode_special("<|start|>"), tokenizer.encode_special("<|end|>")
+channel_tok = tokenizer.encode_special("<|channel|>")
+message_tok = tokenizer.encode_special("<|message|>")
+assistant_end = end
+
+def append_chat_message(tokens, role, content):
+    tokens.append(start)
+    tokens.append(channel_tok)
+    tokens.extend(tokenizer.encode(role))
+    tokens.append(message_tok)
+    tokens.extend(tokenizer.encode(content))
+    tokens.append(end)
 
 # Create Engine for efficient generation
 engine = Engine(model, tokenizer)
@@ -69,12 +79,13 @@ while True:
         continue
 
     # Add User message to the conversation
-    conversation_tokens.append(user_start)
-    conversation_tokens.extend(tokenizer.encode(user_input))
-    conversation_tokens.append(user_end)
+    append_chat_message(conversation_tokens, "user", user_input)
 
     # Kick off the assistant
-    conversation_tokens.append(assistant_start)
+    conversation_tokens.append(start)
+    conversation_tokens.append(channel_tok)
+    conversation_tokens.extend(tokenizer.encode("assistant"))
+    conversation_tokens.append(message_tok)
     generate_kwargs = {
         "num_samples": 1,
         "max_tokens": 256,
