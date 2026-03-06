@@ -264,7 +264,7 @@ async def generate_stream(
     max_new_tokens = max_new_tokens if max_new_tokens is not None else args.max_tokens
     top_k = top_k if top_k is not None else args.top_k
 
-    assistant_end = worker.tokenizer.encode_special("<|assistant_end|>")
+    assistant_end = worker.tokenizer.encode_special("<|end|>")
     bos = worker.tokenizer.get_bos_token_id()
 
     # Accumulate tokens to properly handle multi-byte UTF-8 characters (like emojis)
@@ -322,23 +322,32 @@ async def chat_completions(request: ChatRequest):
     try:
         # Build conversation tokens
         bos = worker.tokenizer.get_bos_token_id()
-        user_start = worker.tokenizer.encode_special("<|user_start|>")
-        user_end = worker.tokenizer.encode_special("<|user_end|>")
-        assistant_start = worker.tokenizer.encode_special("<|assistant_start|>")
-        assistant_end = worker.tokenizer.encode_special("<|assistant_end|>")
+        start = worker.tokenizer.encode_special("<|start|>")
+        end = worker.tokenizer.encode_special("<|end|>")
+        channel_tok = worker.tokenizer.encode_special("<|channel|>")
+        message_tok = worker.tokenizer.encode_special("<|message|>")
 
         conversation_tokens = [bos]
         for message in request.messages:
             if message.role == "user":
-                conversation_tokens.append(user_start)
+                conversation_tokens.append(start)
+                conversation_tokens.append(channel_tok)
+                conversation_tokens.extend(worker.tokenizer.encode("user"))
+                conversation_tokens.append(message_tok)
                 conversation_tokens.extend(worker.tokenizer.encode(message.content))
-                conversation_tokens.append(user_end)
+                conversation_tokens.append(end)
             elif message.role == "assistant":
-                conversation_tokens.append(assistant_start)
+                conversation_tokens.append(start)
+                conversation_tokens.append(channel_tok)
+                conversation_tokens.extend(worker.tokenizer.encode("assistant"))
+                conversation_tokens.append(message_tok)
                 conversation_tokens.extend(worker.tokenizer.encode(message.content))
-                conversation_tokens.append(assistant_end)
+                conversation_tokens.append(end)
 
-        conversation_tokens.append(assistant_start)
+        conversation_tokens.append(start)
+        conversation_tokens.append(channel_tok)
+        conversation_tokens.extend(worker.tokenizer.encode("assistant"))
+        conversation_tokens.append(message_tok)
 
         # Streaming response with worker release after completion
         response_tokens = []
