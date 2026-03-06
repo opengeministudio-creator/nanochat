@@ -41,11 +41,17 @@ class CustomJSON(Task):
                     # Validate the conversation structure
                     assert isinstance(messages, list), f"Expected list of messages, got {type(messages)}"
                     assert len(messages) >= 2, f"Conversation must have at least 2 messages, got {len(messages)}"
+                    has_system_prefix = messages[0].get("role") == "system"
                     # Validate message structure and alternating roles
                     for i, message in enumerate(messages):
                         assert "role" in message, f"Message {i} missing 'role' field"
                         assert "content" in message, f"Message {i} missing 'content' field"
-                        expected_role = "user" if i % 2 == 0 else "assistant"
+                        if has_system_prefix and i == 0:
+                            expected_role = "system"
+                        elif has_system_prefix:
+                            expected_role = "user" if i % 2 == 1 else "assistant"
+                        else:
+                            expected_role = "user" if i % 2 == 0 else "assistant"
                         assert message["role"] == expected_role, f"Message {i} has role {message['role']} but should be {expected_role}"
                         assert isinstance(message["content"], str), f"Message {i} content must be a string"
 
@@ -62,4 +68,3 @@ class CustomJSON(Task):
             "messages": messages,
         }
         return conversation
-
