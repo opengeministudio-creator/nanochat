@@ -38,7 +38,7 @@ headers = {
 }
 
 # Load the comprehensive knowledge base
-knowledge_path = os.path.join(os.path.dirname(__file__), "..", "knowledge", "self_knowledge.md")
+knowledge_path = os.path.join(os.path.dirname(__file__), "..", "knowledge", "self-knowledge.md")
 knowledge = open(knowledge_path, "r", encoding="utf-8").read().strip()
 assert os.path.exists(knowledge_path), f"Knowledge base file not found: {knowledge_path}"
 # for right now I am not committing the self_knowledge file to repo. You can use README.md instead
