@@ -13,16 +13,31 @@ from functools import lru_cache
 SPECIAL_TOKENS = [
     # every document begins with the Beginning of Sequence (BOS) token that delimits documents
     "<|bos|>",
-    # tokens below are only used during finetuning to render Conversations into token ids
-    "<|user_start|>", # user messages
-    "<|user_end|>",
-    "<|assistant_start|>", # assistant messages
-    "<|assistant_end|>",
-    "<|python_start|>", # assistant invokes python REPL tool
-    "<|python_end|>",
-    "<|output_start|>", # python REPL outputs back to assistant
-    "<|output_end|>",
+    # harmony-style chat framing tokens
+    "<|start|>",
+    "<|end|>",
+    "<|message|>",
+    "<|role|>",
+    "<|user|>",
+    "<|assistant|>",
+    "<|python|>",
+    "<|output|>",
 ]
+
+# Backward compatibility aliases for older scripts/checkpoints.
+SPECIAL_TOKEN_ALIASES = {
+    "<|user_start|>": "<|start|>",
+    "<|user_end|>": "<|end|>",
+    "<|assistant_start|>": "<|start|>",
+    "<|assistant_end|>": "<|end|>",
+    "<|python_start|>": "<|python|>",
+    "<|python_end|>": "<|end|>",
+    "<|output_start|>": "<|output|>",
+    "<|output_end|>": "<|end|>",
+}
+
+def canonical_special_token(token):
+    return SPECIAL_TOKEN_ALIASES.get(token, token)
 
 # NOTE: this split pattern deviates from GPT-4 in that we use \p{N}{1,2} instead of \p{N}{1,3}
 # I did this because I didn't want to "waste" too many tokens on numbers for smaller vocab sizes.
@@ -120,7 +135,7 @@ class HuggingFaceTokenizer:
 
     def encode_special(self, text):
         # encode a single special token via exact match
-        return self.tokenizer.token_to_id(text)
+        return self.tokenizer.token_to_id(canonical_special_token(text))
 
     def get_bos_token_id(self):
         # Different HuggingFace models use different BOS tokens and there is little consistency
@@ -217,7 +232,7 @@ class RustBPETokenizer:
 
     @lru_cache(maxsize=32)
     def encode_special(self, text):
-        return self.enc.encode_single_token(text)
+        return self.enc.encode_single_token(canonical_special_token(text))
 
     def get_bos_token_id(self):
         return self.bos_token_id
@@ -291,12 +306,16 @@ class RustBPETokenizer:
             messages = conversation["messages"]
         assert len(messages) >= 1, f"Conversation has less than 1 message: {messages}"
 
-        # fetch all the special tokens we need
+        # fetch all the special tokens we need (harmony-style message framing)
         bos = self.get_bos_token_id()
-        user_start, user_end = self.encode_special("<|user_start|>"), self.encode_special("<|user_end|>")
-        assistant_start, assistant_end = self.encode_special("<|assistant_start|>"), self.encode_special("<|assistant_end|>")
-        python_start, python_end = self.encode_special("<|python_start|>"), self.encode_special("<|python_end|>")
-        output_start, output_end = self.encode_special("<|output_start|>"), self.encode_special("<|output_end|>")
+        start = self.encode_special("<|start|>")
+        end = self.encode_special("<|end|>")
+        message_token = self.encode_special("<|message|>")
+        role_token = self.encode_special("<|role|>")
+        user_role = self.encode_special("<|user|>")
+        assistant_role = self.encode_special("<|assistant|>")
+        python_token = self.encode_special("<|python|>")
+        output_token = self.encode_special("<|output|>")
 
         # now we can tokenize the conversation
         add_tokens(bos, 0)
@@ -312,11 +331,11 @@ class RustBPETokenizer:
             if message["role"] == "user":
                 assert isinstance(content, str), "User messages are simply expected to be strings"
                 value_ids = self.encode(content)
-                add_tokens(user_start, 0)
+                add_tokens([start, role_token, user_role, message_token], 0)
                 add_tokens(value_ids, 0)
-                add_tokens(user_end, 0)
+                add_tokens(end, 0)
             elif message["role"] == "assistant":
-                add_tokens(assistant_start, 0)
+                add_tokens([start, role_token, assistant_role, message_token], 0)
                 if isinstance(content, str):
                     # simple string => simply add the tokens
                     value_ids = self.encode(content)
@@ -328,21 +347,21 @@ class RustBPETokenizer:
                             # string part => simply add the tokens
                             add_tokens(value_ids, 1)
                         elif part["type"] == "python":
-                            # python tool call => add the tokens inside <|python_start|> and <|python_end|>
-                            add_tokens(python_start, 1)
+                            # python tool call => mark tool section with harmony-style <|python|> ... <|end|>
+                            add_tokens(python_token, 1)
                             add_tokens(value_ids, 1)
-                            add_tokens(python_end, 1)
+                            add_tokens(end, 1)
                         elif part["type"] == "python_output":
-                            # python output => add the tokens inside <|output_start|> and <|output_end|>
-                            # none of these tokens are supervised because the tokens come from Python at test time
-                            add_tokens(output_start, 0)
+                            # python output is wrapped with <|output|> ... <|end|>
+                            # none of these tokens are supervised because they come from Python at test time
+                            add_tokens(output_token, 0)
                             add_tokens(value_ids, 0)
-                            add_tokens(output_end, 0)
+                            add_tokens(end, 0)
                         else:
                             raise ValueError(f"Unknown part type: {part['type']}")
                 else:
                     raise ValueError(f"Unknown content type: {type(content)}")
-                add_tokens(assistant_end, 1)
+                add_tokens(end, 1)
 
         # truncate to max_tokens tokens MAX (helps prevent OOMs)
         ids = ids[:max_tokens]
@@ -379,9 +398,13 @@ class RustBPETokenizer:
         # Now tokenize the conversation
         ids, mask = self.render_conversation(conversation)
 
-        # Finally, to prime the Assistant for a completion, append the Assistant start token
-        assistant_start = self.encode_special("<|assistant_start|>")
-        ids.append(assistant_start)
+        # Finally, to prime the Assistant for a completion, append the assistant role preamble
+        ids.extend([
+            self.encode_special("<|start|>"),
+            self.encode_special("<|role|>"),
+            self.encode_special("<|assistant|>"),
+            self.encode_special("<|message|>"),
+        ])
         return ids
 
 # -----------------------------------------------------------------------------

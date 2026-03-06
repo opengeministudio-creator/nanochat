@@ -26,10 +26,14 @@ device_type = autodetect_device_type() if args.device_type == "" else args.devic
 ddp, ddp_rank, ddp_local_rank, ddp_world_size, device = compute_init(device_type)
 model, tokenizer, meta = load_model(args.source, device, phase="eval", model_tag=args.model_tag, step=args.step)
 
-# Special tokens for the chat state machine
+# Special tokens for harmony-style chat framing
 bos = tokenizer.get_bos_token_id()
-user_start, user_end = tokenizer.encode_special("<|user_start|>"), tokenizer.encode_special("<|user_end|>")
-assistant_start, assistant_end = tokenizer.encode_special("<|assistant_start|>"), tokenizer.encode_special("<|assistant_end|>")
+start = tokenizer.encode_special("<|start|>")
+end = tokenizer.encode_special("<|end|>")
+message_token = tokenizer.encode_special("<|message|>")
+role_token = tokenizer.encode_special("<|role|>")
+user_role = tokenizer.encode_special("<|user|>")
+assistant_role = tokenizer.encode_special("<|assistant|>")
 
 # Create Engine for efficient generation
 engine = Engine(model, tokenizer)
@@ -69,12 +73,12 @@ while True:
         continue
 
     # Add User message to the conversation
-    conversation_tokens.append(user_start)
+    conversation_tokens.extend([start, role_token, user_role, message_token])
     conversation_tokens.extend(tokenizer.encode(user_input))
-    conversation_tokens.append(user_end)
+    conversation_tokens.append(end)
 
     # Kick off the assistant
-    conversation_tokens.append(assistant_start)
+    conversation_tokens.extend([start, role_token, assistant_role, message_token])
     generate_kwargs = {
         "num_samples": 1,
         "max_tokens": 256,
@@ -91,8 +95,8 @@ while True:
     print()
     # we have to ensure that the assistant end token is the last token
     # so even if generation ends due to max tokens, we have to append it to the end
-    if response_tokens[-1] != assistant_end:
-        response_tokens.append(assistant_end)
+    if response_tokens[-1] != end:
+        response_tokens.append(end)
     conversation_tokens.extend(response_tokens)
 
     # In the prompt mode, we only want a single response and exit
