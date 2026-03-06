@@ -52,6 +52,9 @@ parser.add_argument("--aspect-ratio", type=int, default=64, help="model_dim = de
 parser.add_argument("--head-dim", type=int, default=128, help="target head dimension for attention")
 parser.add_argument("--max-seq-len", type=int, default=2048, help="max context length")
 parser.add_argument("--window-pattern", type=str, default="SSSL", help="sliding window pattern tiled across layers: L=full, S=half context (e.g. 'SSL')")
+parser.add_argument("--num-experts", type=int, default=0, help="number of routed MoE experts (0 disables MoE)")
+parser.add_argument("--top-k-experts", type=int, default=2, help="top-k routed experts per token when MoE is enabled")
+parser.add_argument("--num-shared-experts", type=int, default=1, help="number of dense shared experts when MoE is enabled")
 # Training horizon (only one used, in order of precedence)
 parser.add_argument("--num-iterations", type=int, default=-1, help="explicit number of optimization steps (-1 = disable)")
 parser.add_argument("--target-flops", type=float, default=-1.0, help="calculate num_iterations to reach target_flops (-1 = disable)")
@@ -139,6 +142,7 @@ def build_model_meta(depth):
         sequence_len=args.max_seq_len, vocab_size=vocab_size,
         n_layer=depth, n_head=num_heads, n_kv_head=num_heads, n_embd=model_dim,
         window_pattern=args.window_pattern,
+        num_experts=args.num_experts, top_k_experts=args.top_k_experts, num_shared_experts=args.num_shared_experts,
     )
     with torch.device("meta"):
         model_meta = GPT(config)
